@@ -13,7 +13,6 @@ import {
   Bookmark,
   Settings,
   BarChart3,
-  LogOut,
   RefreshCw,
   ExternalLink,
   Download,
@@ -22,6 +21,10 @@ import {
   BookMarked,
   Loader2,
   ImagePlus,
+  Cloud,
+  CloudOff,
+  Smartphone,
+  Copy,
 } from "lucide-react";
 import {
   Book,
@@ -35,18 +38,19 @@ import {
   isISBN,
   mergeStates,
   classify,
+  parseState,
 } from "./model";
 import {
   searchBooks,
   connectGoogle,
   disconnectGoogle,
-  syncSheets,
   connected,
   clientId,
   allowedEmail,
-  readCloud,
-  writeCloud,
+  configureGoogle,
+  prepareGoogle,
 } from "./services";
+import { syncLibrary } from "./sync";
 type Page = "home" | "shelf" | "data";
 function IconButton({
   children,
@@ -124,6 +128,20 @@ export default function App() {
   const [shelf, setShelf] = useState("すべて");
   const [email, setEmail] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [syncError, setSyncError] = useState("");
+  const [online, setOnline] = useState(navigator.onLine);
+  const [configId, setConfigId] = useState(clientId);
+  const [configEmail, setConfigEmail] = useState(allowedEmail);
+  const [, setConfigRevision] = useState(0);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const blockAutoSync = useRef(false);
+  const pendingSync = useRef(false);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const authEpoch = useRef(0);
   const syncLock = useRef(false);
   const version = useRef(0);
   function notify(s: string) {
@@ -135,12 +153,15 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
   function change(next: State) {
+    next = { ...next, dirty: true };
     if (storageError) {
       notify(storageError);
       return false;
     }
     try {
       persist(next);
+      blockAutoSync.current = false;
+      stateRef.current = next;
       version.current++;
       setState(next);
       return true;
@@ -161,44 +182,156 @@ export default function App() {
       dirty: true,
     });
   }
-  async function sync() {
-    if (syncLock.current) return;
+  async function sync(silent = false) {
+    if (syncLock.current) {
+      pendingSync.current = true;
+      return;
+    }
+    if (!connected() || !navigator.onLine) return;
     syncLock.current = true;
     setSyncing(true);
     const snapshot = version.current;
+    const epoch = authEpoch.current;
+    let editedDuringSync = false;
     try {
-      const remote = await readCloud();
-      if (version.current !== snapshot)
-        throw Error("記録の変更がありました。同期を再試行してください。");
-      const merged = remote ? mergeStates(state, remote) : state;
-      await syncSheets(merged.books);
-      await writeCloud(merged);
-      setState((s) => {
-        const next = {
-          ...(version.current === snapshot ? merged : mergeStates(s, merged)),
-          lastSync: new Date().toISOString(),
-          dirty: version.current !== snapshot,
-        };
-        try {
-          persist(next);
-        } catch {
-          notify("同期しましたが、端末の同期状態を保存できませんでした。");
-        }
-        return next;
-      });
-      notify("スプレッドシートに同期しました");
-    } catch (e) {
-      notify((e as Error).message);
+      const result = await syncLibrary(stateRef.current, !silent);
+      if (epoch !== authEpoch.current) return;
+      editedDuringSync = version.current !== snapshot;
+      const next = editedDuringSync
+        ? {
+            ...mergeStates(stateRef.current, result.state),
+            lastSync: result.state.lastSync,
+          }
+        : result.state;
+      persist(next);
+      stateRef.current = next;
+      version.current++;
+      setState(next);
+      blockAutoSync.current = Boolean(result.sheetError);
+      const error = result.sheetError
+        ? "本棚は Google Drive に共有済みです。スプレッドシートへの転記は未完了です。" +
+          result.sheetError
+        : "";
+      setSyncError(error);
+      if (!silent)
+        notify(
+          error ||
+            "Google に同期しました。ほかの端末でも同じアカウントで接続してください。",
+        );
+    } catch (error) {
+      editedDuringSync = version.current !== snapshot;
+      blockAutoSync.current = true;
+      setSyncError((error as Error).message);
+      if (!silent) notify((error as Error).message);
+      if (!connected()) setEmail("");
     } finally {
       syncLock.current = false;
       setSyncing(false);
+      const queued = pendingSync.current || editedDuringSync;
+      pendingSync.current = false;
+      if (queued && epoch === authEpoch.current && connected()) {
+        clearTimeout(retryTimer.current);
+        retryTimer.current = setTimeout(() => void syncRef.current(true), 600);
+      }
     }
   }
+  const syncRef = useRef(sync);
+  syncRef.current = sync;
   useEffect(() => {
-    if (!state.dirty || !connected()) return;
-    const t = setTimeout(sync, 1600);
-    return () => clearTimeout(t);
-  }, [state.books, state.dirty, email]);
+    if (
+      !state.dirty ||
+      !email ||
+      !connected() ||
+      !online ||
+      blockAutoSync.current
+    )
+      return;
+    const timer = setTimeout(() => void syncRef.current(true), 1200);
+    return () => clearTimeout(timer);
+  }, [state.books, state.shelves, state.dirty, email, online]);
+  useEffect(() => {
+    if (clientId) void prepareGoogle().catch(() => {});
+  }, [configId]);
+  useEffect(() => {
+    if (email && online && connected()) void syncRef.current();
+  }, [email, online]);
+  useEffect(() => {
+    const refresh = () => {
+      if (email && !connected()) {
+        setEmail("");
+        return;
+      }
+      if (email && navigator.onLine && document.visibilityState === "visible")
+        void syncRef.current(true);
+    };
+    const updateOnline = () => {
+      setOnline(navigator.onLine);
+    };
+    const storage = (event: StorageEvent) => {
+      if (event.key !== "dokushoroku-v1" || !event.newValue) return;
+      try {
+        const next = parseState(JSON.parse(event.newValue));
+        stateRef.current = next;
+        version.current++;
+        setState(next);
+      } catch {
+        setSyncError(
+          "別のタブの記録を読み込めません。現在の画面の記録は残っています。",
+        );
+      }
+    };
+    window.addEventListener("online", updateOnline);
+    window.addEventListener("offline", updateOnline);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("storage", storage);
+    const interval = setInterval(refresh, 60000);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("online", updateOnline);
+      window.removeEventListener("offline", updateOnline);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("storage", storage);
+    };
+  }, [email]);
+  useEffect(
+    () => () => {
+      clearTimeout(retryTimer.current);
+    },
+    [],
+  );
+  async function login() {
+    if (connecting || syncing) return;
+    setConnecting(true);
+    setSyncError("");
+    const previous = localStorage.getItem("dokushoroku-google-account");
+    try {
+      const mail = await connectGoogle();
+      if (
+        previous &&
+        previous !== mail &&
+        stateRef.current.books.length &&
+        !confirm(
+          "以前と異なる Google アカウントです。この端末の読書記録を新しいアカウントへ共有しますか？",
+        )
+      ) {
+        disconnectGoogle();
+        localStorage.setItem("dokushoroku-google-account", previous);
+        return;
+      }
+      authEpoch.current++;
+      setEmail(mail);
+      blockAutoSync.current = false;
+      notify("Google に接続しました。保存済みの記録をまとめています。");
+      if (email === mail) void syncRef.current();
+    } catch (error) {
+      setSyncError((error as Error).message);
+      notify((error as Error).message);
+    } finally {
+      setConnecting(false);
+    }
+  }
   function addBook(book: Book) {
     const existing = deduplicate(state.books, book);
     if (existing) {
@@ -285,6 +418,42 @@ export default function App() {
           </IconButton>
         </div>
       </header>
+      <div className={"sharing-strip " + (syncError ? "has-error" : "")}>
+        <div>
+          {email && connected() ? <Cloud size={15} /> : <CloudOff size={15} />}
+          <span>
+            {!online
+              ? "オフライン：この端末に保存しています"
+              : syncing
+                ? "Google と同期しています…"
+                : syncError
+                  ? "この端末に保存済み・共有状況を確認してください"
+                  : email && connected()
+                    ? state.dirty
+                      ? "この端末に保存済み・Google への共有待ち"
+                      : "Google と共有中"
+                    : state.lastSync
+                      ? "端末内に保存済み・共有するには Google に再接続"
+                      : "この端末に保存しています"}
+          </span>
+        </div>
+        <button onClick={() => setModal("settings")}>
+          {email && connected() ? "共有の設定" : "他の端末と共有する"}
+          <ChevronRight size={13} />
+        </button>
+      </div>
+      {syncError && (
+        <div className="sync-error" role="alert">
+          {syncError}
+          <button
+            onClick={() =>
+              email && connected() ? void sync() : setModal("settings")
+            }
+          >
+            {email && connected() ? "再試行" : "接続を確認"}
+          </button>
+        </div>
+      )}
       {storageError && (
         <div className="storage-alert" role="alert">
           {storageError}
@@ -891,18 +1060,122 @@ export default function App() {
               に接続すると専用のスプレッドシートを作成し、記録・一節・実践メモを自動転記します。Google
               Drive の専用データで、iPhone とパソコンの記録も共有します。
             </p>
+            <div className="connection-steps">
+              <span>
+                <b>1</b> この端末で Google に接続
+              </span>
+              <span>
+                <b>2</b> 同期完了を確認
+              </span>
+              <span>
+                <b>3</b> ほかの端末で同じアカウントに接続
+              </span>
+            </div>
             {!clientId && (
               <div className="notice">
-                Google 連携には管理者による初期設定が必要です。設定方法は README
-                をご覧ください。現在は端末内保存モードです。
+                初回のみ、Google
+                側の接続設定が必要です。設定が終わるまでは、この端末の記録をそのまま使えます。
               </div>
             )}
-            {clientId && !allowedEmail && (
-              <div className="notice">
-                利用アカウントが未指定です。個人利用に限定する場合は
-                VITE_ALLOWED_EMAIL を設定してください。
-              </div>
-            )}
+            <details
+              className="google-setup"
+              open={!clientId ? true : undefined}
+            >
+              <summary>はじめての接続設定</summary>
+              <p>
+                Google Cloud
+                で接続用のクライアントIDを作成します。パスワードやクライアントシークレットは入力しません。
+              </p>
+              <ol>
+                <li>
+                  <a
+                    href="https://console.cloud.google.com/projectcreate"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Google Cloud でプロジェクトを作成 <ExternalLink size={12} />
+                  </a>
+                </li>
+                <li>
+                  そのプロジェクトで{" "}
+                  <a
+                    href="https://console.cloud.google.com/apis/library/drive.googleapis.com"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Google Drive API
+                  </a>{" "}
+                  と{" "}
+                  <a
+                    href="https://console.cloud.google.com/apis/library/sheets.googleapis.com"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Google Sheets API
+                  </a>{" "}
+                  を有効にします。
+                </li>
+                <li>
+                  Google Auth Platform の対象を外部・テストにし、ご自身の Google
+                  アカウントだけをテストユーザーに追加します。
+                </li>
+                <li>
+                  クライアントを「ウェブアプリケーション」として作り、承認済みの
+                  JavaScript 生成元に <code>{location.origin}</code>{" "}
+                  を登録します。
+                </li>
+              </ol>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  try {
+                    configureGoogle({
+                      clientId: configId,
+                      allowedEmail: configEmail,
+                    });
+                    authEpoch.current++;
+                    setEmail("");
+                    setSyncError("");
+                    setConfigRevision((n) => n + 1);
+                    notify(
+                      "接続設定を保存しました。「Google でログイン」へ進んでください。",
+                    );
+                    void prepareGoogle().catch(() => {});
+                  } catch (error) {
+                    notify((error as Error).message);
+                  }
+                }}
+              >
+                <Field label="Google OAuth クライアントID">
+                  <input
+                    value={configId}
+                    onChange={(event) => setConfigId(event.target.value)}
+                    autoComplete="off"
+                    placeholder="数字-文字列.apps.googleusercontent.com"
+                    required
+                  />
+                </Field>
+                <Field label="利用する Google メールアドレス（任意）">
+                  <input
+                    type="email"
+                    value={configEmail}
+                    onChange={(event) => setConfigEmail(event.target.value)}
+                    autoComplete="email"
+                    placeholder="誤接続を防ぐため、この端末にだけ保存"
+                  />
+                </Field>
+                <p className="small muted">
+                  このフォームの設定は、このブラウザだけに保存します。メールアドレスや認証情報を
+                  GitHub に送ることはありません。
+                </p>
+                <button
+                  className="button outline"
+                  disabled={syncing || connecting}
+                >
+                  連携設定を保存
+                </button>
+              </form>
+            </details>
             {email && (
               <p className="connection">
                 <Check size={15} />
@@ -912,27 +1185,26 @@ export default function App() {
             <div className="button-row">
               <button
                 className="button dark"
-                disabled={!clientId || syncing}
-                onClick={async () => {
-                  try {
-                    const mail = await connectGoogle();
-                    const remote = await readCloud();
-                    if (remote && !change(mergeStates(state, remote))) return;
-                    setEmail(mail);
-                    notify("Google に接続しました");
-                  } catch (e) {
-                    notify((e as Error).message);
-                  }
-                }}
+                disabled={!clientId || syncing || connecting || !online}
+                onClick={() => void login()}
               >
-                {email ? "Google に再接続" : "Google でログイン"}
+                {connecting ? (
+                  <Loader2 className="spin" size={15} />
+                ) : (
+                  <Cloud size={15} />
+                )}{" "}
+                {connecting
+                  ? "接続を確認しています…"
+                  : email && connected()
+                    ? "Google に再接続"
+                    : "Google でログイン"}
               </button>
-              {email && (
+              {email && connected() && (
                 <>
                   <button
                     className="button outline"
-                    onClick={sync}
-                    disabled={syncing}
+                    onClick={() => void sync()}
+                    disabled={syncing || !online}
                   >
                     {syncing ? (
                       <Loader2 className="spin" size={15} />
@@ -941,18 +1213,27 @@ export default function App() {
                     )}
                     今すぐ同期
                   </button>
-                  <IconButton
-                    label="Google から切断"
+                  <button
+                    className="button outline"
+                    disabled={syncing}
                     onClick={() => {
+                      authEpoch.current++;
                       disconnectGoogle();
                       setEmail("");
+                      setSyncError("");
                     }}
                   >
-                    <LogOut size={18} />
-                  </IconButton>
+                    切断
+                  </button>
                 </>
               )}
             </div>
+            {state.lastSync && (
+              <p className="small muted">
+                最終共有確認：{new Date(state.lastSync).toLocaleString("ja-JP")}
+                {state.dirty ? " ／ 未同期の変更があります" : ""}
+              </p>
+            )}
             {localStorage.getItem("dokushoroku-sheet") && (
               <a
                 className="text-link"
@@ -967,6 +1248,39 @@ export default function App() {
               スプレッドシートでの編集は読み戻しません。端末間の共有には Google
               Drive に保存する専用データを使います。別の端末でも同じ Google
               アカウントで接続してください。ブラウザのデータを削除する前にバックアップしてください。
+            </p>
+          </div>
+          <div className="setting-block">
+            <h3>
+              <Smartphone size={18} /> スマホ・別のブラウザで使う
+            </h3>
+            <p>
+              スマホでも同じアドレスを開けます。「本の登録」からカメラ読み取り・書名検索・手入力ができます。記録を共有する場合は、先にこの端末で同期し、次の端末でも同じ
+              Google アカウントで接続してください。
+            </p>
+            <button
+              className="button outline"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(
+                    location.href.split("#")[0],
+                  );
+                  notify(
+                    "アプリのアドレスをコピーしました。スマホへ送って開いてください。",
+                  );
+                } catch {
+                  notify(
+                    "アドレス欄の URL をコピーしてスマホへ送ってください。",
+                  );
+                }
+              }}
+            >
+              <Copy size={15} />
+              アプリのアドレスをコピー
+            </button>
+            <p className="small muted">
+              ブラウザを開き直したときや接続期限が切れたときは Google
+              へ再接続してください。接続中は保存後と約1分ごと、画面に戻ったときに共有を確認します。
             </p>
           </div>
           <div className="setting-block">
@@ -990,19 +1304,7 @@ export default function App() {
                   try {
                     const f = e.target.files?.[0];
                     if (!f) return;
-                    const data = JSON.parse(await f.text());
-                    if (
-                      !Array.isArray(data.books) ||
-                      !Array.isArray(data.shelves) ||
-                      data.books.some(
-                        (b: any) =>
-                          typeof b.title !== "string" ||
-                          typeof b.id !== "string" ||
-                          !Array.isArray(b.quotes) ||
-                          !Array.isArray(b.actions),
-                      )
-                    )
-                      throw Error("形式が正しくありません。");
+                    const data = parseState(JSON.parse(await f.text()));
                     if (
                       !confirm(
                         "バックアップを現在の記録に追加します。同じIDの本は現在の記録を保持します。よろしいですか？",
@@ -1136,6 +1438,7 @@ function Register({
   useEffect(() => {
     if (mode !== "scan") return;
     let stopped = false;
+    const videoElement = video.current;
     let controls: { stop: () => void } | undefined;
     setCameraError("");
     (async () => {
@@ -1149,7 +1452,7 @@ function Register({
         const reader = new BrowserMultiFormatReader();
         controls = await reader.decodeFromConstraints(
           { video: { facingMode: { ideal: "environment" } }, audio: false },
-          video.current!,
+          videoElement!,
           (result) => {
             if (!result || stopped) return;
             const code = result.getText();
@@ -1172,7 +1475,7 @@ function Register({
     return () => {
       stopped = true;
       controls?.stop();
-      const stream = video.current?.srcObject as MediaStream | null;
+      const stream = videoElement?.srcObject as MediaStream | null;
       stream?.getTracks().forEach((t) => t.stop());
     };
   }, [mode]);
@@ -1242,7 +1545,7 @@ function Register({
       {mode === "scan" && (
         <div className="scanner">
           <div className="video-frame">
-            <video ref={video} playsInline muted />
+            <video ref={video} autoPlay playsInline muted />
             <div className="scan-target" />
           </div>
           <p>

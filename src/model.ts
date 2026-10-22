@@ -147,10 +147,7 @@ export function load(): State {
       dirty: false,
     };
   try {
-    const data = JSON.parse(raw);
-    if (!Array.isArray(data.books) || !Array.isArray(data.shelves))
-      throw Error();
-    return data;
+    return parseState(JSON.parse(raw));
   } catch {
     throw new Error(
       "保存データを読み込めません。データを消さずに、ブラウザの保存内容を確認してください。",
@@ -277,5 +274,114 @@ export function mergeStates(local: State, remote: State): State {
     shelves: [...new Set([...local.shelves, ...remote.shelves])],
     lastSync: local.lastSync,
     dirty: true,
+  };
+}
+
+/** Validate remote/backup data before it can replace any locally saved record. */
+export function parseState(input: unknown): State {
+  const invalid = () => {
+    throw Error(
+      "読書記録の形式を確認できません。端末の記録を残して、読み込みを中断しました。",
+    );
+  };
+  if (!input || typeof input !== "object") return invalid();
+  const data = input as Record<string, unknown>;
+  if (
+    !Array.isArray(data.books) ||
+    !Array.isArray(data.shelves) ||
+    !data.shelves.every((s) => typeof s === "string")
+  )
+    return invalid();
+  const ids = new Set<string>();
+  const books = data.books.map((input: unknown) => {
+    if (!input || typeof input !== "object") return invalid();
+    const b = input as Record<string, unknown>;
+    if (
+      typeof b.id !== "string" ||
+      !b.id ||
+      ids.has(b.id) ||
+      typeof b.title !== "string"
+    )
+      return invalid();
+    ids.add(b.id);
+    for (const k of [
+      "author",
+      "isbn",
+      "description",
+      "cover",
+      "genre",
+      "subgenre",
+      "school",
+      "store",
+      "url",
+      "finished",
+      "notes",
+      "bookmark",
+      "created",
+      "updated",
+      "color",
+    ])
+      if (b[k] !== undefined && typeof b[k] !== "string") return invalid();
+    for (const k of ["tags", "shelves", "related"])
+      if (
+        b[k] !== undefined &&
+        (!Array.isArray(b[k]) ||
+          !(b[k] as unknown[]).every((v) => typeof v === "string"))
+      )
+        return invalid();
+    if (
+      b.status !== undefined &&
+      !["読みたい", "読書中", "読了"].includes(String(b.status))
+    )
+      return invalid();
+    if (
+      b.format !== undefined &&
+      !["紙の本", "電子書籍", "両方"].includes(String(b.format))
+    )
+      return invalid();
+    if (
+      b.quotes !== undefined &&
+      (!Array.isArray(b.quotes) ||
+        !b.quotes.every(
+          (q) =>
+            q &&
+            typeof q.id === "string" &&
+            typeof q.text === "string" &&
+            typeof q.location === "string",
+        ))
+    )
+      return invalid();
+    if (
+      b.actions !== undefined &&
+      (!Array.isArray(b.actions) ||
+        !b.actions.every(
+          (a) =>
+            a &&
+            typeof a.id === "string" &&
+            typeof a.text === "string" &&
+            typeof a.reflection === "string" &&
+            ["未実施", "試した", "振り返り済み"].includes(a.status),
+        ))
+    )
+      return invalid();
+    if (b.created && !Number.isFinite(Date.parse(String(b.created))))
+      return invalid();
+    if (b.updated && !Number.isFinite(Date.parse(String(b.updated))))
+      return invalid();
+    const created =
+      typeof b.created === "string" && b.created
+        ? b.created
+        : new Date(0).toISOString();
+    return makeBook({
+      ...b,
+      created,
+      updated: typeof b.updated === "string" && b.updated ? b.updated : created,
+    } as Partial<Book>);
+  });
+  return {
+    books,
+    shelves: data.shelves,
+    lastSync: typeof data.lastSync === "string" ? data.lastSync : "",
+    dirty: Boolean(data.dirty),
   };
 }

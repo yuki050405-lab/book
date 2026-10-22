@@ -1,4 +1,11 @@
-import { Book, State, makeBook, classify, rowsForSheets } from "./model";
+import {
+  Book,
+  State,
+  makeBook,
+  classify,
+  rowsForSheets,
+  parseState,
+} from "./model";
 export async function searchBooks(query: string): Promise<Book[]> {
   const isbn = query.replace(/[-\s]/g, "");
   const isCode = /^\d{9}[\dXx]$|^\d{13}$/.test(isbn);
@@ -64,22 +71,80 @@ declare global {
 }
 let token = "";
 let expiry = 0;
-export const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
-export const allowedEmail = import.meta.env.VITE_ALLOWED_EMAIL || "";
-async function gis() {
+const CONFIG_KEY = "dokushoroku-google-config-v1";
+function savedConfig(): { clientId?: string; allowedEmail?: string } {
+  try {
+    const data = JSON.parse(localStorage.getItem(CONFIG_KEY) || "{}");
+    return data && typeof data === "object"
+      ? {
+          clientId: typeof data.clientId === "string" ? data.clientId : "",
+          allowedEmail:
+            typeof data.allowedEmail === "string" ? data.allowedEmail : "",
+        }
+      : {};
+  } catch {
+    return {};
+  }
+}
+const config = savedConfig();
+export let clientId =
+  config.clientId || import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+export let allowedEmail =
+  config.allowedEmail || import.meta.env.VITE_ALLOWED_EMAIL || "";
+export function configureGoogle(next: {
+  clientId: string;
+  allowedEmail: string;
+}) {
+  const id = next.clientId.trim();
+  const email = next.allowedEmail.trim().toLowerCase();
+  if (!/^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(id))
+    throw Error(
+      "OAuth クライアントIDを確認してください。パスワードやクライアントシークレットは入力しないでください。",
+    );
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    throw Error("メールアドレスを確認してください。");
+  localStorage.setItem(
+    CONFIG_KEY,
+    JSON.stringify({ clientId: id, allowedEmail: email }),
+  );
+  disconnectGoogle();
+  clientId = id;
+  allowedEmail = email;
+}
+let gisLoading: Promise<void> | undefined;
+export async function prepareGoogle() {
   if (window.google?.accounts) return;
-  await new Promise<void>((resolve, reject) => {
-    const s = document.createElement("script");
-    s.src = "https://accounts.google.com/gsi/client";
-    s.onload = () => resolve();
-    s.onerror = () => reject(Error("Google ログインを読み込めません。"));
-    document.head.appendChild(s);
-  });
+  if (!gisLoading)
+    gisLoading = new Promise<void>((resolve, reject) => {
+      const script = document.createElement("script");
+      const timeout = setTimeout(() => {
+        script.remove();
+        gisLoading = undefined;
+        reject(
+          Error("Google に接続できません。通信を確認して再試行してください。"),
+        );
+      }, 15000);
+      script.src = "https://accounts.google.com/gsi/client";
+      script.onload = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      script.onerror = () => {
+        clearTimeout(timeout);
+        script.remove();
+        gisLoading = undefined;
+        reject(Error("Google ログインを読み込めません。"));
+      };
+      document.head.appendChild(script);
+    });
+  return gisLoading;
 }
 export async function connectGoogle(): Promise<string> {
   if (!clientId)
-    throw Error("Google 連携は未設定です。設定手順は README をご覧ください。");
-  await gis();
+    throw Error(
+      "Google 連携は未設定です。「はじめての接続設定」を開いてください。",
+    );
+  await prepareGoogle();
   return new Promise((resolve, reject) => {
     window.google.accounts.oauth2
       .initTokenClient({
@@ -89,17 +154,30 @@ export async function connectGoogle(): Promise<string> {
         callback: async (r: any) => {
           try {
             if (r.error) throw Error("Google の認証が完了しませんでした。");
+            if (!r.access_token)
+              throw Error("Google の認証が完了しませんでした。");
             token = r.access_token;
-            expiry = Date.now() + Number(r.expires_in) * 1000;
+            expiry = Date.now() + Number(r.expires_in || 3600) * 1000;
             const user = await api(
               "https://www.googleapis.com/oauth2/v3/userinfo",
             );
-            if (allowedEmail && user.email !== allowedEmail) {
+            if (
+              !user.email ||
+              (allowedEmail &&
+                user.email.toLowerCase() !== allowedEmail.toLowerCase())
+            ) {
               disconnectGoogle();
               throw Error("この Google アカウントは利用対象ではありません。");
             }
+            const previous = localStorage.getItem("dokushoroku-google-account");
+            if (previous && previous !== user.email) {
+              cloudFile = "";
+              localStorage.removeItem("dokushoroku-sheet");
+            }
+            localStorage.setItem("dokushoroku-google-account", user.email);
             resolve(user.email);
           } catch (e) {
+            disconnectGoogle();
             reject(e);
           }
         },
@@ -129,6 +207,13 @@ async function api(url: string, options: RequestInit = {}) {
       ...options.headers,
     },
   });
+  if (r.status === 401) {
+    token = "";
+    expiry = 0;
+    throw Error(
+      "Google の接続期限が切れました。再接続してください。端末内の記録は残っています。",
+    );
+  }
   if (!r.ok)
     throw Error(
       `Google 連携に失敗しました（${r.status}）。本は端末に保存されています。`,
@@ -149,12 +234,13 @@ export async function readCloud(): Promise<State | null> {
   const data = await api(
     `https://www.googleapis.com/drive/v3/files/${cloudFile}?alt=media`,
   );
-  if (!Array.isArray(data.books) || !Array.isArray(data.shelves))
-    throw Error(
-      "Google Drive の読書録データを読み込めません。同期を中断しました。",
-    );
-  if (data.sheetId) localStorage.setItem("dokushoroku-sheet", data.sheetId);
-  return data;
+  const state = parseState(data);
+  if (data.sheetId) {
+    if (typeof data.sheetId !== "string" || !/^[-\w]+$/.test(data.sheetId))
+      throw Error("スプレッドシートの保存先が不正です。同期を中断しました。");
+    localStorage.setItem("dokushoroku-sheet", data.sheetId);
+  }
+  return state;
 }
 export async function writeCloud(state: State) {
   if (!cloudFile) {
@@ -174,6 +260,7 @@ export async function writeCloud(state: State) {
       method: "PATCH",
       body: JSON.stringify({
         ...state,
+        dirty: false,
         sheetId: localStorage.getItem("dokushoroku-sheet") || "",
       }),
     },

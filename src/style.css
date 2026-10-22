@@ -2197,3 +2197,142 @@ footer small {
   text-decoration: underline;
   color: #e0c994;
 }
+.sharing-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 9px 5.4%;
+  background: #eeeee4;
+  border-bottom: 1px solid #dfe2d4;
+  color: #7c8670;
+  font-size: 10px;
+  line-height: 1.6;
+}
+.sharing-strip > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sharing-strip > button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: none;
+  color: #466340;
+  font-size: 10px;
+  white-space: nowrap;
+  padding: 3px 0;
+}
+.sharing-strip.has-error {
+  background: #f0e9d8;
+}
+.sync-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  font-size: 11px;
+  line-height: 1.8;
+  padding: 12px 5.4%;
+  color: #846b39;
+  background: #f4eddd;
+  border-bottom: 1px solid #e3d9bf;
+}
+.sync-error > button {
+  white-space: nowrap;
+  padding: 6px 10px;
+  background: #e8ddc3;
+  color: #715b33;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.connection-steps {
+  display: grid;
+  gap: 12px;
+  background: #edf0e4;
+  padding: 18px;
+  margin: 18px 0;
+  color: #687d5d;
+  font-size: 11px;
+}
+.connection-steps span {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.connection-steps b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid #b7c0a6;
+  border-radius: 50%;
+  font: 12px Georgia;
+}
+.google-setup {
+  border: 1px solid #dcded0;
+  padding: 15px 18px;
+  margin: 20px 0;
+}
+.google-setup summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #586e4a;
+}
+.google-setup p,
+.google-setup ol {
+  font-size: 11px;
+  line-height: 1.9;
+  color: #859176;
+  margin: 15px 0;
+}
+.google-setup ol {
+  padding-left: 18px;
+}
+.google-setup li {
+  margin-bottom: 9px;
+}
+.google-setup a {
+  color: #536b45;
+}
+.google-setup a svg {
+  display: inline;
+}
+.google-setup code {
+  word-break: break-all;
+  color: #536b45;
+}
+.setting-block h3 svg {
+  vertical-align: middle;
+  margin-right: 5px;
+}
+@media (max-width: 700px) {
+  .sharing-strip {
+    padding: 9px 20px;
+    font-size: 9px;
+    gap: 8px;
+  }
+  .sharing-strip > button {
+    font-size: 9px;
+  }
+  .sharing-strip > div {
+    gap: 5px;
+  }
+  .sharing-strip > div svg {
+    width: 13px;
+  }
+  .sync-error {
+    padding: 11px 20px;
+    font-size: 10px;
+    gap: 10px;
+  }
+  .google-setup {
+    padding: 14px;
+  }
+  .google-setup p,
+  .google-setup ol {
+    font-size: 10px;
+  }
+}

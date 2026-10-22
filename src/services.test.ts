@@ -100,3 +100,27 @@ describe("外部サービス連携（通信モック）", () => {
     expect(window.google.accounts.oauth2.revoke).toHaveBeenCalled();
   });
 });
+
+describe("ブラウザ内の Google 接続設定", () => {
+  it("クライアントシークレットを受け付けず、IDとメールだけを保存する", async () => {
+    const service = await import("./services");
+    expect(() =>
+      service.configureGoogle({
+        clientId: "GOCSPX-not-a-client-id",
+        allowedEmail: "",
+      }),
+    ).toThrow("クライアントID");
+    service.configureGoogle({
+      clientId: "123456789-browser-test.apps.googleusercontent.com",
+      allowedEmail: "Owner@Example.test",
+    });
+    const config = JSON.parse(
+      localStorage.getItem("dokushoroku-google-config-v1")!,
+    );
+    expect(config).toEqual({
+      clientId: "123456789-browser-test.apps.googleusercontent.com",
+      allowedEmail: "owner@example.test",
+    });
+    expect(JSON.stringify(config)).not.toContain("test-token");
+  });
+});
