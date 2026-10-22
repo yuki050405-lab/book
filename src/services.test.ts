@@ -124,3 +124,32 @@ describe("ブラウザ内の Google 接続設定", () => {
     expect(JSON.stringify(config)).not.toContain("test-token");
   });
 });
+
+describe("Sheets が拒否した場合の詳細表示", () => {
+  it("HTTP403の本文を調べ、再接続の要求ではなくAPI有効化を案内する", async () => {
+    localStorage.setItem(
+      "dokushoroku-v1",
+      JSON.stringify({ books: [{ title: "保存済みの本" }] }),
+    );
+    const before = localStorage.getItem("dokushoroku-v1");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.includes("userinfo")
+          ? Response.json({ email: "owner@example.test" })
+          : Response.json(
+              {
+                error: { code: 403, details: [{ reason: "SERVICE_DISABLED" }] },
+              },
+              { status: 403 },
+            ),
+      ),
+    );
+    const { connectGoogle, syncSheets } = await import("./services");
+    await connectGoogle();
+    await expect(
+      syncSheets([makeBook({ title: "保存済みの本" })]),
+    ).rejects.toThrow("Google Sheets API が有効になっていないか");
+    expect(localStorage.getItem("dokushoroku-v1")).toBe(before);
+  });
+});

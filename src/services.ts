@@ -1,3 +1,4 @@
+import { googleApiError } from "./googleErrors";
 import {
   Book,
   State,
@@ -214,10 +215,15 @@ async function api(url: string, options: RequestInit = {}) {
       "Google の接続期限が切れました。再接続してください。端末内の記録は残っています。",
     );
   }
-  if (!r.ok)
-    throw Error(
-      `Google 連携に失敗しました（${r.status}）。本は端末に保存されています。`,
-    );
+  if (!r.ok) {
+    let detail: unknown;
+    try {
+      detail = await r.json();
+    } catch {
+      /* Some proxies return text instead of Google's JSON. */
+    }
+    throw Error(googleApiError(url, r.status, detail));
+  }
   return r.json();
 }
 let cloudFile = "";
